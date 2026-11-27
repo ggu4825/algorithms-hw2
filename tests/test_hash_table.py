@@ -1,6 +1,6 @@
 import unittest
 
-from src.hash_table import HashTable
+from src.hash_table import HashTable, LinearProbingHashTable
 
 
 class HashTableTests(unittest.TestCase):
@@ -76,6 +76,79 @@ class HashTableTests(unittest.TestCase):
             with self.subTest(capacity=capacity):
                 with self.assertRaises((TypeError, ValueError)):
                     HashTable(capacity)
+
+
+class LinearProbingHashTableTests(unittest.TestCase):
+    def test_empty_table_and_missing_key(self):
+        table = LinearProbingHashTable()
+
+        self.assertEqual(len(table), 0)
+        self.assertIsNone(table.get("missing"))
+        self.assertFalse(table.contains("missing"))
+        self.assertEqual(table.probe_count("missing"), 1)
+
+    def test_wraps_from_last_slot_to_first_slot(self):
+        table = LinearProbingHashTable[str](capacity=5)
+        colliding_keys = [
+            f"key-{index}"
+            for index in range(100)
+            if _horner_index(f"key-{index}", 5) == 4
+        ][:2]
+
+        table.put(colliding_keys[0], "last")
+        table.put(colliding_keys[1], "first")
+
+        self.assertEqual(table._slots[4].key, colliding_keys[0])
+        self.assertEqual(table._slots[0].key, colliding_keys[1])
+        self.assertEqual(table.get(colliding_keys[1]), "first")
+        self.assertEqual(table.probe_count(colliding_keys[1]), 2)
+        missing_key = next(
+            f"missing-{index}"
+            for index in range(100)
+            if _horner_index(f"missing-{index}", 5) == 4
+        )
+        self.assertIsNone(table.get(missing_key))
+        self.assertEqual(table.probe_count(missing_key), 3)
+
+    def test_replaces_existing_key_even_when_full(self):
+        table = LinearProbingHashTable[str](capacity=2)
+        table.put("first", "old")
+        table.put("second", "two")
+
+        table.put("first", "new")
+
+        self.assertEqual(table.get("first"), "new")
+        self.assertEqual(len(table), 2)
+        with self.assertRaises(OverflowError):
+            table.put("third", "three")
+
+    def test_empty_string_collisions_and_lookup(self):
+        table = LinearProbingHashTable[str](capacity=3)
+        table.put("", "empty")
+        table.put("c", "one")
+
+        self.assertEqual(table.get(""), "empty")
+        self.assertEqual(table.get("c"), "one")
+        self.assertTrue(table.contains("c"))
+        self.assertFalse(table.contains("missing"))
+
+    def test_non_string_keys_and_invalid_capacities_are_rejected(self):
+        table = LinearProbingHashTable()
+        for key in (None, 42):
+            with self.subTest(key=key):
+                for operation in (
+                    lambda: table.put(key, "value"),
+                    lambda: table.get(key),
+                    lambda: table.contains(key),
+                    lambda: table.probe_count(key),
+                ):
+                    with self.assertRaises(TypeError):
+                        operation()
+
+        for capacity in (0, -1, "8", True):
+            with self.subTest(capacity=capacity):
+                with self.assertRaises((TypeError, ValueError)):
+                    LinearProbingHashTable(capacity)
 
 
 def _horner_index(key, capacity):
