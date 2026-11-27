@@ -1,0 +1,170 @@
+import threading
+import unittest
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
+from urllib.parse import urlencode
+
+import src.server as server_module
+import src.shortener as shortener_module
+from src.hash_table import HashTable
+from src.server import ShortenerRequestHandler
+
+
+class ServerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_tables = (
+            shortener_module._url_to_code,
+            shortener_module._code_to_url,
+            shortener_module._next_identifier,
+        )
+        shortener_module._url_to_code = HashTable()
+        shortener_module._code_to_url = HashTable()
+        shortener_module._next_identifier = 0
+        server_module._url_to_code = shortener_module._url_to_code
+        server_module._code_to_url = shortener_module._code_to_url
+
+        cls.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), ShortenerRequestHandler
+        )
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+        (
+            shortener_module._url_to_code,
+            shortener_module._code_to_url,
+            shortener_module._next_identifier,
+        ) = cls.original_tables
+        server_module._url_to_code = shortener_module._url_to_code
+        server_module._code_to_url = shortener_module._code_to_url
+
+    def _request(self, path, *, data=None, headers=None):
+        connection = HTTPConnection("127.0.0.1", self.server.server_port)
+        try:
+            connection.request(
+                "POST" if data is not None else "GET",
+                path,
+                body=data,
+                headers=headers or {},
+            )
+            response = connection.getresponse()
+            return response.status, response.headers, response.read().decode("utf-8")
+        finally:
+            connection.close()
+
+    def _shorten(self, url, headers=None):
+        body = f"url={url}".encode("utf-8")
+        status, response_headers, content = self._request(
+            "/shorten",
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(body)),
+                **(headers or {}),
+            },
+        )
+        return status, response_headers, content
+
+    def test_home_and_successful_form_use_forwarded_origin(self):
+        status, _, content = self._request("/")
+        self.assertEqual(status, 200)
+        self.assertIn('action="/shorten"', content)
+
+        status, _, content = self._shorten(
+            "https%3A%2F%2Fexample.test%2Fpath",
+            {
+                "Host": "internal.local:8000",
+                "X-Forwarded-Host": "my-space.app.github.dev",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("https://my-space.app.github.dev/", content)
+
+    def test_host_fallback_and_redirect_to_original_url(self):
+        original_url = "https://redirect-target.example.test/path"
+        status, _, content = self._shorten(original_url)
+        self.assertEqual(status, 200)
+        self.assertIn(
+            f"http://127.0.0.1:{self.server.server_port}/",
+            content,
+        )
+        code = content.split("<code>", 1)[1].split("</code>", 1)[0]
+
+        status, headers, _ = self._request(f"/{code}")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["Location"], original_url)
+
+    def test_invalid_input_and_unknown_code_have_error_status(self):
+        status, _, _ = self._shorten("not-a-url")
+        self.assertEqual(status, 400)
+
+        status, _, _ = self._request("/unknown-code")
+        self.assertEqual(status, 404)
+
+    def test_form_accepts_maximum_length_unicode_url(self):
+        prefix = "https://example.test/"
+        url = prefix + "é" * (2048 - len(prefix))
+        body = urlencode({"url": url}).encode("utf-8")
+
+        status, _, _ = self._request(
+            "/shorten",
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(body)),
+            },
+        )
+
+        self.assertEqual(status, 200)
+
+    def test_table_shows_chains_horner_steps_and_links(self):
+        self._shorten("https://table-entry.example.test/path")
+        status, _, content = self._request(
+            "/table",
+            headers={
+                "X-Forwarded-Host": "public.example.test",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIn("URL → 짧은 코드", content)
+        self.assertIn("짧은 코드 → URL", content)
+        self.assertIn("호너 해시 계산 과정", content)
+        self.assertIn("https://public.example.test/", content)
+
+    def test_table_links_colliding_nodes_with_arrows(self):
+        first_url = "https://chain-0.example.test/"
+        first_bucket = server_module._url_to_code._index(first_url)
+        second_url = next(
+            f"https://chain-{index}.example.test/"
+            for index in range(1, 100)
+            if server_module._url_to_code._index(
+                f"https://chain-{index}.example.test/"
+            )
+            == first_bucket
+        )
+        self._shorten(first_url)
+        self._shorten(second_url)
+
+        status, _, content = self._request("/table")
+
+        self.assertEqual(status, 200)
+        self.assertIn('<span class="arrow">→</span>', content)
+
+    def test_invalid_forwarded_origin_is_rejected(self):
+        status, _, _ = self._shorten(
+            "https://valid-url.example.test/",
+            {"X-Forwarded-Host": "attacker.test/path"},
+        )
+        self.assertEqual(status, 400)
+
+
+if __name__ == "__main__":
+    unittest.main()
