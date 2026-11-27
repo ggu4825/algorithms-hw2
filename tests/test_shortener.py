@@ -1,9 +1,14 @@
 import unittest
 
-from src.shortener import expand, shorten
+from src.shortener import expand, reset_state, shorten
 
 
-class ShortenerTests(unittest.TestCase):
+class ShortenerTestCases:
+    backend = "chaining"
+
+    def setUp(self):
+        reset_state(self.backend)
+
     def test_sequential_codes_deduplication_and_expansion(self):
         first_url = "http://example.com"
         second_url = "https://example.com"
@@ -55,6 +60,14 @@ class ShortenerTests(unittest.TestCase):
     def test_non_string_url_is_rejected(self):
         with self.assertRaises(TypeError):
             shorten(None)
+
+
+class ChainingShortenerTests(ShortenerTestCases, unittest.TestCase):
+    backend = "chaining"
+
+
+class LinearProbingShortenerTests(ShortenerTestCases, unittest.TestCase):
+    backend = "linear"
 
 
 if __name__ == "__main__":

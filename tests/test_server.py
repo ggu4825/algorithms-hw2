@@ -4,25 +4,14 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlencode
 
-import src.server as server_module
 import src.shortener as shortener_module
-from src.hash_table import HashTable
 from src.server import ShortenerRequestHandler
 
 
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.original_tables = (
-            shortener_module._url_to_code,
-            shortener_module._code_to_url,
-            shortener_module._next_identifier,
-        )
-        shortener_module._url_to_code = HashTable()
-        shortener_module._code_to_url = HashTable()
-        shortener_module._next_identifier = 0
-        server_module._url_to_code = shortener_module._url_to_code
-        server_module._code_to_url = shortener_module._code_to_url
+        shortener_module.reset_state("chaining")
 
         cls.server = ThreadingHTTPServer(
             ("127.0.0.1", 0), ShortenerRequestHandler
@@ -35,13 +24,7 @@ class ServerTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
-        (
-            shortener_module._url_to_code,
-            shortener_module._code_to_url,
-            shortener_module._next_identifier,
-        ) = cls.original_tables
-        server_module._url_to_code = shortener_module._url_to_code
-        server_module._code_to_url = shortener_module._code_to_url
+        shortener_module.reset_state("chaining")
 
     def _request(self, path, *, data=None, headers=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_port)
@@ -141,11 +124,11 @@ class ServerTests(unittest.TestCase):
 
     def test_table_links_colliding_nodes_with_arrows(self):
         first_url = "https://chain-0.example.test/"
-        first_bucket = server_module._url_to_code._index(first_url)
+        first_bucket = shortener_module._url_to_code._index(first_url)
         second_url = next(
             f"https://chain-{index}.example.test/"
             for index in range(1, 100)
-            if server_module._url_to_code._index(
+            if shortener_module._url_to_code._index(
                 f"https://chain-{index}.example.test/"
             )
             == first_bucket
@@ -157,6 +140,55 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIn('<span class="arrow">→</span>', content)
+
+    def test_table_switches_to_linear_and_preserves_links(self):
+        original_url = "https://switch-backend.example.test/path"
+        status, _, result = self._shorten(original_url)
+        self.assertEqual(status, 200)
+        code = result.split("<code>", 1)[1].split("</code>", 1)[0]
+
+        status, headers, _ = self._request(
+            "/table/backend",
+            data=b"backend=linear",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "14",
+            },
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/table")
+        self.assertEqual(shortener_module.get_backend(), "linear")
+        self.assertEqual(shortener_module.expand(code), original_url)
+
+        status, _, content = self._request("/table")
+        self.assertEqual(status, 200)
+        self.assertIn("linear", content)
+        self.assertIn("탐사 거리:", content)
+        self.assertIn(original_url, content)
+
+        status, headers, _ = self._request(
+            "/table/backend",
+            data=b"backend=chaining",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "16",
+            },
+        )
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/table")
+        self.assertEqual(shortener_module.get_backend(), "chaining")
+        self.assertEqual(shortener_module.expand(code), original_url)
+
+    def test_invalid_backend_selection_returns_bad_request(self):
+        status, _, _ = self._request(
+            "/table/backend",
+            data=b"backend=unknown",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "14",
+            },
+        )
+        self.assertEqual(status, 400)
 
     def test_invalid_forwarded_origin_is_rejected(self):
         status, _, _ = self._shorten(

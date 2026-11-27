@@ -22,7 +22,7 @@
 | `SPEC.md` | 명세 틀. 에이전트가 초안을 쓰고 **본인이 고칩니다** |
 | `src/` · `tests/` · `experiments/` | 비어 있습니다. 수업에서 채웁니다 |
 | `tools/catchup.sh` | 수업 중 놓친 단계를 따라잡는 스크립트 |
-| `Makefile` | `make test` · `make serve` · `make experiment` |
+| `Makefile` | `make test` · `make serve` · `make experiment` · `make experiment-linear` |
 
 정답 코드는 들어 있지 않습니다. 에이전트는 작업 공간의 파일을 읽으므로, 정답이
 옆에 있으면 그대로 베껴 와서 연습이 되지 않습니다.
@@ -36,6 +36,7 @@
 | 테스트 | `make test` |
 | 웹 서버 (포트 8000) | `make serve` |
 | 충돌 실험 | `make experiment` |
+| 체이닝·선형 탐지 비교 | `make experiment-linear` |
 | 놓친 단계 따라잡기 | `sh tools/catchup.sh <단계 번호>` |
 
 외부 라이브러리는 쓰지 않습니다. Python 표준 모듈만으로 충분합니다.
@@ -48,6 +49,11 @@
 `make serve`는 모든 인터페이스에서 기본 포트 8000을 엽니다. 리버스 프록시 뒤에서
 쓸 때는 프록시가 `X-Forwarded-Host`와 `X-Forwarded-Proto`를 올바른 공개 origin으로
 설정해야 짧은 링크가 브라우저에서 바로 열립니다.
+`/table`에서 충돌 처리 방식을 바꿀 수 있으며, 바꿔도 저장한 URL과 코드가 유지됩니다.
+`make experiment-linear`는 동일한 URL 표본과 4,093칸으로 개별 체이닝과 선형 탐지를
+적재율 0.1부터 0.9까지 비교해
+`experiments/linear_probing_results.csv`와
+`experiments/linear_probing_results.svg`를 생성합니다.
 
 ## 로컬에서 하기
 

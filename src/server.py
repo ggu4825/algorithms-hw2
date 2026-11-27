@@ -8,8 +8,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from src.hash_table import HashTable
-from src.shortener import _code_to_url, _url_to_code, expand, shorten
+import src.shortener as shortener
+from src.hash_table import HashTable, LinearProbingHashTable
+from src.shortener import configure_backend, expand, get_backend, shorten
 
 
 _MAX_FORM_BYTES = 32_768
@@ -60,14 +61,21 @@ def _node_html(
     capacity: int,
     key_label: str,
     value_label: str,
+    probe_count: int | None = None,
 ) -> str:
     safe_link = html.escape(short_link, quote=True)
+    probe_detail = (
+        f"<br><strong>탐사 거리:</strong> {probe_count}칸"
+        if probe_count is not None
+        else ""
+    )
     return (
         '<div class="node">'
         f"<strong>{html.escape(key_label)}:</strong> "
         f"{html.escape(key)}<br>"
         f"<strong>{html.escape(value_label)}:</strong> "
         f"{html.escape(value)}<br>"
+        f"{probe_detail}"
         f"<strong>짧은 코드:</strong> {html.escape(code)}<br>"
         f'<strong>짧은 링크:</strong> <a href="{safe_link}">{safe_link}</a>'
         "<details><summary>호너 해시 계산 과정</summary>"
@@ -77,7 +85,7 @@ def _node_html(
 
 
 def _table_html(
-    table: HashTable[str],
+    table: HashTable[str] | LinearProbingHashTable[str],
     origin: str,
     title: str,
     key_label: str,
@@ -85,6 +93,32 @@ def _table_html(
     url_is_key: bool,
 ) -> str:
     rows = []
+    if isinstance(table, LinearProbingHashTable):
+        for index, entry in enumerate(table._slots):
+            if entry is None:
+                rows.append(f"<tr><th>{index}</th><td>비어 있음</td></tr>")
+                continue
+            code = entry.value if url_is_key else entry.key
+            short_link = f"{origin}/{code}"
+            node_html = _node_html(
+                entry.key,
+                entry.value,
+                code,
+                short_link,
+                table.capacity,
+                key_label,
+                value_label,
+                table.probe_count(entry.key),
+            )
+            rows.append(f'<tr><th>{index}</th><td>{node_html}</td></tr>')
+        return (
+            f"<h2>{html.escape(title)}</h2>"
+            '<table class="buckets"><thead><tr><th>칸</th><th>저장 항목</th>'
+            "</tr></thead><tbody>"
+            + "".join(rows)
+            + "</tbody></table>"
+        )
+
     for index, first_node in enumerate(table._buckets):
         chain = []
         node = first_node
@@ -194,18 +228,31 @@ class ShortenerRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             with _STATE_LOCK:
+                selected_backend = get_backend()
+                selector = (
+                    '<form action="/table/backend" method="post">'
+                    '<label for="backend">충돌 처리 방식</label> '
+                    '<select id="backend" name="backend">'
+                    f'<option value="chaining"{" selected" if selected_backend == "chaining" else ""}>'
+                    "개별 체이닝</option>"
+                    f'<option value="linear"{" selected" if selected_backend == "linear" else ""}>'
+                    "선형 탐지</option>"
+                    '</select> <button type="submit">방식 바꾸기</button></form>'
+                    "<p>방식을 바꾸어도 기존 URL과 짧은 코드는 유지됩니다.</p>"
+                )
                 content = (
                     '<p><a href="/">처음으로</a></p>'
+                    + selector
                     + _table_html(
-                        _url_to_code,
+                        shortener._url_to_code,
                         origin,
-                        "URL → 짧은 코드",
+                        f"URL → 짧은 코드 ({selected_backend})",
                         "URL 키",
                         "짧은 코드",
                         True,
                     )
                     + _table_html(
-                        _code_to_url,
+                        shortener._code_to_url,
                         origin,
                         "짧은 코드 → URL",
                         "짧은 코드",
@@ -240,6 +287,9 @@ class ShortenerRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if urlsplit(self.path).path != "/shorten":
+            if urlsplit(self.path).path == "/table/backend":
+                self._select_backend()
+                return
             self._send_html(
                 404,
                 _page("찾을 수 없음", '<p class="error">페이지를 찾을 수 없습니다.</p>'),
@@ -268,6 +318,16 @@ class ShortenerRequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        except OverflowError as error:
+            self._send_html(
+                503,
+                _page(
+                    "테이블 가득 참",
+                    f'<p class="error">{html.escape(str(error))}</p>'
+                    '<p><a href="/table">테이블 보기</a></p>',
+                ),
+            )
+            return
 
         short_link = f"{origin}/{code}"
         safe_link = html.escape(short_link, quote=True)
@@ -279,6 +339,34 @@ class ShortenerRequestHandler(BaseHTTPRequestHandler):
             '<a href="/table">해시 테이블 보기</a></p>'
         )
         self._send_html(200, _page("단축 결과", content))
+
+    def _select_backend(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+            if content_length < 0 or content_length > _MAX_FORM_BYTES:
+                raise ValueError("Invalid form length")
+            form_body = self.rfile.read(content_length).decode("utf-8")
+            form = parse_qs(form_body, strict_parsing=True)
+            backends = form.get("backend", [])
+            if len(backends) != 1 or backends[0] not in ("chaining", "linear"):
+                raise ValueError("알 수 없는 해시 테이블 방식입니다.")
+            with _STATE_LOCK:
+                configure_backend(backends[0])
+        except (UnicodeDecodeError, ValueError) as error:
+            self._send_html(
+                400,
+                _page(
+                    "입력 오류",
+                    f'<p class="error">{html.escape(str(error))}</p>'
+                    '<p><a href="/table">테이블 보기</a></p>',
+                ),
+            )
+            return
+
+        self.send_response(303)
+        self.send_header("Location", "/table")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def main() -> None:
